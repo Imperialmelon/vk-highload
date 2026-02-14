@@ -3,7 +3,7 @@
 ## Тема
 **Reddit** - один из крупнейших веб-сервисов в мире. Сочетает в себе функционал месседжера и социальной сети. 
 
-![Reddit Logo](https://avatars.mds.yandex.net/i?id=2965c5c628148b5f18c3952685a2f55d_l-7594176-images-thumbs&n=13)
+<img src="https://avatars.mds.yandex.net/i?id=2965c5c628148b5f18c3952685a2f55d_l-7594176-images-thumbs&n=13" width="300">
 
 
 ## MVP функции
