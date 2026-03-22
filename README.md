@@ -695,6 +695,9 @@
 | **Comment** | Хранит текст и рейтинг комментариев. Поддерживает древовидную структуру за счет связи с родительским комментарием (parent_comment_id). |
 | **PostVote** | Регистрирует голоса пользователей (upvote/downvote) за посты для расчета общего рейтинга. |
 | **CommentVote** | Регистрирует голоса пользователей за отдельные комментарии. |
+| **GlobalSearch** | Поисковые запросы пользователя по всему реддиту |
+| **SubredditSearch** | Поисковый запрос пользователя по сабреддиту |
+| **PostCommentSearch** | Поисковый запрос ползователя в секции комментариев под постом |
 
 ### Расчет размеров данных
 
@@ -714,6 +717,9 @@
 | **Comment** | 8 (id) + 8 (creator_id) + 8 (post_id) + 8 (parent_comment_id) + 100 (content) + 8 (rating) + 1 (is_deleted) + 8 (created_at) + 8 (updated_at) | 157 байт | 16 млрд. | 2.34 ТБ |
 | **PostVote** | 8 (id) + 8 (user_id) + 8 (post_id) + 1 (is_voteup) + 1 (is_deleted) + 8 (created_at) + 8 (updated_at) | 42 байт | 9.4 млн. | 0.37 ГБ |
 | **CommentVote** | 8 (id) + 8 (user_id) + 8 (comment_id) + 1 (is_voteup) + 1 (is_deleted) + 8 (created_at) + 8 (updated_at) | 42 байт | 9.4 млн. | 0.37 ГБ |
+| **GlobalSearch** | 8 (id) + 8 (user_id) + 100 (query_text) + 12 (initial_tab) + 1 (is_deleted) + 8 (created_at) | 137 байт | 1.2 млрд. | 153.1 ГБ |
+| **SubredditSearch** | 8 (id) + 8 (user_id) + 8 (subreddit_id) + 100 (query_text) + 1 (is_deleted) + 8 (created_at) | 133 байт | 600 млн. | 74.3 ГБ |
+| **PostCommentSearch** | 8 (id) + 8 (user_id) + 8 (post_id) + 100 (query_text) + 1 (is_deleted) + 8 (created_at) | 133 байт | 200 млн. | 24.8 ГБ |
 
 ### Расчет нагрузки на базу данных (QPS)
 
@@ -731,7 +737,11 @@
 | **Просмотр постов** | 155 475 | 777 380 | 3 (select post, select content, select user) | 466 425 | 2 332 140 | — | — |
 | **Поиск поста** | 1169 | 5845 | 2 (select search_idx, select post_details) | 2338 | 11 690 | — | — |
 | **Запрос ленты** | 4863 | 24 315 | 4 (select subs, select posts, select media, select votes) | 19 452 | 97 260 | — | — |
-| **ИТОГО** | **162 065** | **810 325** | — | **488 556** | **2 442 775** | **575** | **2 877** |
+| **Глобальный поиск** | 701 | 3505 | 3 (select results, insert history, select user_history) | 1051 | 5257 | 701 | 3505 |
+| **Поиск в сабреддите** | 350 | 1750 | 3 (select sub_results, insert history, select sub_history) | 525 | 2625 | 350 | 1750 |
+| **Поиск в комментариях** | 118 | 590 | 3 (select comm_results, insert history, select comm_history) | 177 | 885 | 118 | 590 |
+| **ИТОГО (Поиск)** | **1169** | **5845** | — | **1753** | **8767** | **1169** | **5845** |
+
 
 ### Требования к консистентности данных
 
@@ -747,6 +757,13 @@
 | **Счетчики (Denormalization)** | Поля вроде `subscriptions` в таблице `Subreddit` или `rating` в `Post` должны быть синхронизированы с количеством реальных записей в таблицах связей. | Асинхронные воркеры или триггеры для инкремента/декремента. |
 | **Медиа-ссылки** | Запись в `PostImages`, `PostVideo` или `PostLink` не может существовать без родительской записи в таблице `Posts`. | `FOREIGN KEY ... ON DELETE CASCADE`. |
 | **Статус сессии** | Токен сессии считается невалидным, если `expired_at < NOW()`. Проверка должна происходить на уровне middleware до обращения к бизнес-логике. | Индекс на `expired_at` для быстрой очистки просроченных сессий по расписанию. |
+| **Валидация контекста** | В `subreddit_search` поле `subreddit_id` должно указывать на существующий и активный сабреддит. | Foreign Key с правилом `ON DELETE CASCADE`. |
+| **Очистка при удалении** | При удалении поста (`is_deleted = true`), связанные записи в `post_comment_search` должны скрываться или удаляться. | Trigger или фоновая задача (Cleanup Job). |
+| **Нормализация текста** | Текст запроса перед сохранением приводится к `trim()` и `lowercase()`. | Обработка на уровне Backend-сервиса перед вставкой. |
+| **Лимитирование (TTL)** | Хранение истории поиска ограничено по времени (например, 90 дней) или по количеству (последние 100 записей на пользователя). | Cron-задача: `DELETE FROM search_history WHERE created_at < NOW() - INTERVAL '90 days'`. |
+| **Защита от дублей** | Если пользователь ищет одно и то же слово подряд, новая запись не создается, а обновляется `created_at` у старой. | `INSERT ... ON CONFLICT (user_id, query_text, subreddit_id) DO UPDATE SET created_at = NOW()`. |
+| **Приватность** | История поиска доступна для чтения только владельцу аккаунта (`user_id`). | Проверка Policy (RLS в Postgres) или логика на уровне API. |
+| **Целостность вкладок** | Для `global_search` поле `initial_tab` должно строго соответствовать списку допустимых разделов (posts, communities, comments, users). | `CHECK (initial_tab IN ('all', 'posts', 'communities', 'comments', 'users'))`. |
 
 ---
 
